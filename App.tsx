@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Bot, Mic, MessagesSquare, Wand2, Sparkles, AlertCircle, FileText } from 'lucide-react';
 import { VoiceName, TTSMode, GeneratedAudio, ConversationLine } from './types';
 import { generateSingleSpeakerAudio, generateMultiSpeakerAudio } from './services/geminiService';
-import { decodeBase64, createWavBlob } from './utils/audioUtils';
+import { decodeBase64, createMp3Blob } from './utils/audioUtils';
 import { VoiceSelector } from './components/VoiceSelector';
 import { AudioPlayer } from './components/AudioPlayer';
 import { ScriptImportModal } from './components/ScriptImportModal';
@@ -75,13 +75,17 @@ const App: React.FC = () => {
       } else {
         // Append continuation lines to the previous speaker's text
         if (newConversationLines.length > 0) {
-           newConversationLines[newConversationLines.length - 1].text += ` ${line.trim()}`;
+           const prevLine = newConversationLines[newConversationLines.length - 1];
+           prevLine.text = (prevLine.text + ` ${line.trim()}`).trim();
         }
       }
     }
 
-    if (newConversationLines.length > 0) {
-      setConversationLines(newConversationLines);
+    // Filter out any empty lines that might have been created
+    const filteredLines = newConversationLines.filter(line => line.text.trim().length > 0);
+
+    if (filteredLines.length > 0) {
+      setConversationLines(filteredLines);
       if (foundSpeaker1) setSpeaker1Name(foundSpeaker1);
       if (foundSpeaker2) setSpeaker2Name(foundSpeaker2);
     }
@@ -111,8 +115,9 @@ const App: React.FC = () => {
 
       const pcmData = decodeBase64(base64Audio);
       // Gemini TTS defaults to 24000Hz for this model
-      const wavBlob = createWavBlob(pcmData, 24000);
-      const url = URL.createObjectURL(wavBlob);
+      // Use createMp3Blob instead of createWavBlob
+      const mp3Blob = createMp3Blob(pcmData, 24000);
+      const url = URL.createObjectURL(mp3Blob);
 
       const newItem: GeneratedAudio = {
         id: Date.now().toString(),

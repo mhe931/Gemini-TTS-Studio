@@ -98,9 +98,9 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ src, label }) => {
 
         <a
           href={src}
-          download={`gemini-tts-${Date.now()}.wav`}
+          download={`gemini-tts-${Date.now()}.mp3`}
           className="p-2 text-slate-400 hover:text-white transition-colors"
-          title="Download WAV"
+          title="Download MP3"
         >
           <Download size={20} />
         </a>
