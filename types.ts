@@ -9,6 +9,7 @@ export enum VoiceName {
 export enum TTSMode {
   Single = 'Single Speaker',
   Conversation = 'Conversation',
+  Document = 'Document Processing',
 }
 
 export interface GeneratedAudio {

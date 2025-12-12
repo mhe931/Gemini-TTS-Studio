@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { Bot, Mic, MessagesSquare, Wand2, Sparkles, AlertCircle, FileText } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { Bot, Mic, MessagesSquare, Wand2, Sparkles, AlertCircle, FileText, Upload, FileType } from 'lucide-react';
 import { VoiceName, TTSMode, GeneratedAudio, ConversationLine } from './types';
 import { generateSingleSpeakerAudio, generateMultiSpeakerAudio } from './services/geminiService';
-import { decodeBase64, createMp3Blob } from './utils/audioUtils';
+import { createMp3Blob } from './utils/audioUtils';
+import { extractTextFromPdf, splitTextForNarration } from './utils/pdfUtils';
 import { VoiceSelector } from './components/VoiceSelector';
 import { AudioPlayer } from './components/AudioPlayer';
 import { ScriptImportModal } from './components/ScriptImportModal';
@@ -27,6 +28,11 @@ const App: React.FC = () => {
     { speaker: 'Speaker B', text: 'Yes! The audio capabilities are incredible.' },
     { speaker: 'Speaker A', text: 'Especially the multi-speaker support. It sounds so natural.' },
   ]);
+
+  // Document State
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [fileName, setFileName] = useState<string>('');
+  const [isProcessingPdf, setIsProcessingPdf] = useState(false);
 
   // History / Results
   const [history, setHistory] = useState<GeneratedAudio[]>([]);
@@ -57,7 +63,6 @@ const App: React.FC = () => {
         return 'Speaker B';
       }
 
-      // Default to Speaker A if more than 2 speakers found (limitation of current UI)
       return 'Speaker A'; 
     };
 
@@ -73,7 +78,6 @@ const App: React.FC = () => {
         
         newConversationLines.push({ speaker: slot, text });
       } else {
-        // Append continuation lines to the previous speaker's text
         if (newConversationLines.length > 0) {
            const prevLine = newConversationLines[newConversationLines.length - 1];
            prevLine.text = (prevLine.text + ` ${line.trim()}`).trim();
@@ -81,7 +85,6 @@ const App: React.FC = () => {
       }
     }
 
-    // Filter out any empty lines that might have been created
     const filteredLines = newConversationLines.filter(line => line.text.trim().length > 0);
 
     if (filteredLines.length > 0) {
@@ -91,31 +94,80 @@ const App: React.FC = () => {
     }
   };
 
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (file.type !== 'application/pdf') {
+      setError("Please upload a valid PDF file.");
+      return;
+    }
+
+    setFileName(file.name);
+    setIsProcessingPdf(true);
+    setError(null);
+
+    try {
+      const text = await extractTextFromPdf(file);
+      const chunks = splitTextForNarration(text);
+      
+      // Automatically distribute chunks between speakers
+      const docLines: ConversationLine[] = chunks.map((chunk, index) => ({
+        speaker: index % 2 === 0 ? 'Speaker A' : 'Speaker B',
+        text: chunk
+      }));
+
+      setConversationLines(docLines);
+      // Ensure we switch to document/conversation mode logic but keep the UI clear
+      setSpeaker1Name("Narrator 1");
+      setSpeaker2Name("Narrator 2");
+      setSpeaker1Voice(VoiceName.Fenrir); // Deep voice for narration
+      setSpeaker2Voice(VoiceName.Kore); // Clear voice for narration
+    } catch (err: any) {
+      console.error(err);
+      setError("Failed to parse PDF. Please try a different file.");
+    } finally {
+      setIsProcessingPdf(false);
+      // Clear input so same file can be selected again if needed
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const handleGenerate = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      let base64Audio = '';
+      let pcmData: Uint8Array | null = null;
       let snippet = '';
 
       if (mode === TTSMode.Single) {
         if (!singleText.trim()) throw new Error("Please enter some text.");
-        base64Audio = await generateSingleSpeakerAudio(singleText, singleVoice);
+        pcmData = await generateSingleSpeakerAudio(singleText, singleVoice);
         snippet = singleText.slice(0, 50) + (singleText.length > 50 ? '...' : '');
       } else {
+        // Conversation OR Document mode (both use conversationLines)
+        if (conversationLines.length === 0) throw new Error("No content to generate. Please add text or upload a document.");
         if (conversationLines.some(l => !l.text.trim())) throw new Error("Please fill in all conversation lines.");
-        base64Audio = await generateMultiSpeakerAudio(
+        
+        pcmData = await generateMultiSpeakerAudio(
             conversationLines,
             { name: speaker1Name, voice: speaker1Voice },
             { name: speaker2Name, voice: speaker2Voice }
         );
-        snippet = "Conversation: " + conversationLines[0].text.slice(0, 30) + "...";
+        
+        if (mode === TTSMode.Document) {
+          snippet = `Document: ${fileName || 'Processed PDF'}`;
+        } else {
+          snippet = "Conversation: " + conversationLines[0].text.slice(0, 30) + "...";
+        }
       }
 
-      const pcmData = decodeBase64(base64Audio);
+      if (!pcmData) {
+        throw new Error("Failed to generate audio.");
+      }
+
       // Gemini TTS defaults to 24000Hz for this model
-      // Use createMp3Blob instead of createWavBlob
       const mp3Blob = createMp3Blob(pcmData, 24000);
       const url = URL.createObjectURL(mp3Blob);
 
@@ -154,6 +206,93 @@ const App: React.FC = () => {
     setConversationLines(conversationLines.filter((_, i) => i !== index));
   };
 
+  // Helper to render the shared multi-speaker/document editor
+  const renderMultiSpeakerEditor = (isDocumentMode: boolean) => (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2 p-3 bg-slate-800 rounded-lg border border-slate-700">
+          <label className="text-xs text-blue-400 font-bold uppercase">{isDocumentMode ? 'Voice 1 (Narrator)' : 'Speaker A Name'}</label>
+          <input 
+            type="text" 
+            value={speaker1Name}
+            onChange={(e) => setSpeaker1Name(e.target.value)}
+            className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm"
+          />
+          <VoiceSelector label="Voice" selectedVoice={speaker1Voice} onChange={setSpeaker1Voice} />
+        </div>
+        <div className="space-y-2 p-3 bg-slate-800 rounded-lg border border-slate-700">
+          <label className="text-xs text-indigo-400 font-bold uppercase">{isDocumentMode ? 'Voice 2 (Narrator)' : 'Speaker B Name'}</label>
+          <input 
+            type="text" 
+            value={speaker2Name}
+            onChange={(e) => setSpeaker2Name(e.target.value)}
+            className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm"
+          />
+          <VoiceSelector label="Voice" selectedVoice={speaker2Voice} onChange={setSpeaker2Voice} />
+        </div>
+      </div>
+
+      <div className="space-y-3">
+          <div className="flex justify-between items-end">
+            <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              {isDocumentMode ? 'Extracted Narration Script' : 'Dialogue Script'}
+            </label>
+            {!isDocumentMode && (
+              <button 
+                onClick={() => setIsImportModalOpen(true)}
+                className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors px-2 py-1 hover:bg-slate-800 rounded"
+              >
+                <FileText size={14} />
+                Paste Script
+              </button>
+            )}
+          </div>
+          
+          <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+            {conversationLines.length === 0 && isDocumentMode ? (
+              <div className="text-center py-10 text-slate-500 text-sm border-2 border-dashed border-slate-700 rounded-lg">
+                Upload a PDF to see the extracted text segments here.
+              </div>
+            ) : (
+              conversationLines.map((line, idx) => (
+                <div key={idx} className="flex gap-2 items-start group">
+                    <div 
+                    onClick={() => updateConversationLine(idx, 'speaker', line.speaker === 'Speaker A' ? 'Speaker B' : 'Speaker A')}
+                    className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold cursor-pointer select-none transition-colors mt-2 ${
+                      line.speaker === 'Speaker A' ? 'bg-blue-600 text-white' : 'bg-indigo-600 text-white'
+                    }`}
+                    title="Click to toggle speaker"
+                    >
+                      {line.speaker === 'Speaker A' ? (isDocumentMode ? '1' : 'A') : (isDocumentMode ? '2' : 'B')}
+                    </div>
+                    <textarea
+                      rows={isDocumentMode ? 4 : 2}
+                      value={line.text}
+                      onChange={(e) => updateConversationLine(idx, 'text', e.target.value)}
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm focus:ring-1 focus:ring-blue-500 resize-none"
+                      placeholder={`Text segment for ${line.speaker === 'Speaker A' ? speaker1Name : speaker2Name}...`}
+                    />
+                    <button 
+                      onClick={() => removeConversationLine(idx)}
+                      className="mt-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      &times;
+                    </button>
+                </div>
+              ))
+            )}
+          </div>
+          
+          <button 
+            onClick={addConversationLine}
+            className="w-full py-2 border border-dashed border-slate-600 rounded-lg text-slate-400 hover:text-blue-400 hover:border-blue-400 transition-colors text-sm font-medium"
+          >
+            + Add Segment
+          </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-200 p-4 md:p-8 flex justify-center">
       <ScriptImportModal 
@@ -189,7 +328,7 @@ const App: React.FC = () => {
               }`}
             >
               <Mic size={16} />
-              Single Speaker
+              Single
             </button>
             <button
               onClick={() => setMode(TTSMode.Conversation)}
@@ -200,12 +339,21 @@ const App: React.FC = () => {
               <MessagesSquare size={16} />
               Conversation
             </button>
+             <button
+              onClick={() => setMode(TTSMode.Document)}
+              className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 ${
+                mode === TTSMode.Document ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <FileType size={16} />
+              Document
+            </button>
           </div>
 
           {/* Configuration Area */}
           <div className="bg-slate-800/50 rounded-2xl p-6 border border-slate-700/50 backdrop-blur-sm">
             
-            {mode === TTSMode.Single ? (
+            {mode === TTSMode.Single && (
               <div className="space-y-4">
                 <VoiceSelector 
                   label="Select Voice" 
@@ -228,77 +376,38 @@ const App: React.FC = () => {
                   </div>
                 </div>
               </div>
-            ) : (
-              <div className="space-y-6">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2 p-3 bg-slate-800 rounded-lg border border-slate-700">
-                    <label className="text-xs text-blue-400 font-bold uppercase">Speaker A Name</label>
-                    <input 
-                      type="text" 
-                      value={speaker1Name}
-                      onChange={(e) => setSpeaker1Name(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm"
-                    />
-                    <VoiceSelector label="Voice" selectedVoice={speaker1Voice} onChange={setSpeaker1Voice} />
-                  </div>
-                  <div className="space-y-2 p-3 bg-slate-800 rounded-lg border border-slate-700">
-                    <label className="text-xs text-indigo-400 font-bold uppercase">Speaker B Name</label>
-                    <input 
-                      type="text" 
-                      value={speaker2Name}
-                      onChange={(e) => setSpeaker2Name(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm"
-                    />
-                    <VoiceSelector label="Voice" selectedVoice={speaker2Voice} onChange={setSpeaker2Voice} />
-                  </div>
-                </div>
+            )}
 
-                <div className="space-y-3">
-                    <div className="flex justify-between items-end">
-                      <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Dialogue Script</label>
-                      <button 
-                        onClick={() => setIsImportModalOpen(true)}
-                        className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors px-2 py-1 hover:bg-slate-800 rounded"
-                      >
-                        <FileText size={14} />
-                        Paste Script
-                      </button>
-                    </div>
-                    <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                      {conversationLines.map((line, idx) => (
-                        <div key={idx} className="flex gap-2 items-start group">
-                           <div 
-                            onClick={() => updateConversationLine(idx, 'speaker', line.speaker === 'Speaker A' ? 'Speaker B' : 'Speaker A')}
-                            className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold cursor-pointer select-none transition-colors mt-2 ${
-                              line.speaker === 'Speaker A' ? 'bg-blue-600 text-white' : 'bg-indigo-600 text-white'
-                            }`}
-                            title="Click to toggle speaker"
-                           >
-                             {line.speaker === 'Speaker A' ? 'A' : 'B'}
-                           </div>
-                           <textarea
-                              rows={2}
-                              value={line.text}
-                              onChange={(e) => updateConversationLine(idx, 'text', e.target.value)}
-                              className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm focus:ring-1 focus:ring-blue-500 resize-none"
-                              placeholder={`What does ${line.speaker === 'Speaker A' ? speaker1Name : speaker2Name} say?`}
-                           />
-                           <button 
-                             onClick={() => removeConversationLine(idx)}
-                             className="mt-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                           >
-                             &times;
-                           </button>
-                        </div>
-                      ))}
+            {mode === TTSMode.Conversation && renderMultiSpeakerEditor(false)}
+
+            {mode === TTSMode.Document && (
+              <div className="space-y-6">
+                 {/* Upload Section */}
+                 <div className="border-2 border-dashed border-slate-600 rounded-xl p-6 flex flex-col items-center justify-center text-center bg-slate-800/30 hover:bg-slate-800/50 transition-colors">
+                    <input 
+                      type="file" 
+                      accept=".pdf" 
+                      onChange={handleFileUpload}
+                      ref={fileInputRef}
+                      className="hidden"
+                    />
+                    <div className="bg-slate-700/50 p-4 rounded-full mb-3">
+                      <Upload size={24} className="text-blue-400" />
                     </div>
                     <button 
-                      onClick={addConversationLine}
-                      className="w-full py-2 border border-dashed border-slate-600 rounded-lg text-slate-400 hover:text-blue-400 hover:border-blue-400 transition-colors text-sm font-medium"
+                       onClick={() => fileInputRef.current?.click()}
+                       disabled={isProcessingPdf}
+                       className="text-white font-medium hover:underline mb-1 disabled:opacity-50"
                     >
-                      + Add Line
+                      {isProcessingPdf ? 'Processing PDF...' : 'Click to Upload PDF'}
                     </button>
-                </div>
+                    <p className="text-xs text-slate-400">
+                      {fileName ? `Current file: ${fileName}` : 'Upload a scientific paper or document for dual-voice narration.'}
+                    </p>
+                 </div>
+
+                 {/* Use the shared editor to show the extracted text chunks */}
+                 {renderMultiSpeakerEditor(true)}
               </div>
             )}
           </div>
@@ -314,9 +423,9 @@ const App: React.FC = () => {
              
              <button
                onClick={handleGenerate}
-               disabled={loading}
+               disabled={loading || (mode === TTSMode.Document && conversationLines.length === 0)}
                className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2 transition-all ${
-                 loading 
+                 loading || (mode === TTSMode.Document && conversationLines.length === 0)
                  ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
                  : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white active:scale-[0.99]'
                }`}
@@ -353,7 +462,7 @@ const App: React.FC = () => {
                <div className="space-y-4">
                  {history.map((item) => (
                    <div key={item.id} className="animate-fade-in-down">
-                     <AudioPlayer src={item.url} label={item.mode === TTSMode.Single ? 'Single Speaker' : 'Conversation'} />
+                     <AudioPlayer src={item.url} label={item.mode === TTSMode.Document ? 'Document Narration' : (item.mode === TTSMode.Single ? 'Single Speaker' : 'Conversation')} />
                      <p className="text-xs text-slate-500 mt-2 px-1 truncate">
                        {item.textSnippet}
                      </p>
