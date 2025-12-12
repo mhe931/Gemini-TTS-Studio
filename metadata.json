@@ -1,5 +1,5 @@
 {
-  "name": "Gemini TTS Studio",
+  "name": "TTS Studio",
   "description": "A professional-grade text-to-speech synthesis application utilizing Gemini 2.5 Flash. Supports multi-speaker conversations and high-fidelity audio generation.",
   "requestFramePermissions": []
 }
