@@ -1,10 +1,10 @@
 import { VoiceName } from "../types";
 import { decodeBase64 } from "../utils/audioUtils";
 
-const API_ENDPOINT = "/api/tts/generate";
+const API_ENDPOINT = "/api/tts/sovits/generate";
 
 /**
- * Generates audio for a single speaker by calling the external TTS API.
+ * Generates audio for a single speaker by calling the external SoVITS TTS API.
  */
 export const generateSingleSpeakerAudio = async (
   text: string,
@@ -23,13 +23,14 @@ export const generateSingleSpeakerAudio = async (
     });
 
     if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}: ${response.statusText}`);
+      const errorBody = await response.text();
+      throw new Error(`API request failed with status ${response.status}: ${errorBody || response.statusText}`);
     }
 
     const data = await response.json();
 
     if (!data.audio_base64) {
-      throw new Error("No audio data returned from API.");
+      throw new Error("Invalid response from API: Missing 'audio_base64' field.");
     }
 
     return decodeBase64(data.audio_base64);
